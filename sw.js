@@ -1,9 +1,13 @@
-const CACHE_NAME = 'nwc-v1';
+const CACHE_NAME = 'nwc-v1.1';
 const ASSETS = [
     './',
     './index.html',
+    './manifest.json',
     'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
-    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+    'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+    'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+    'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'
 ];
 
 self.addEventListener('install', (event) => {
@@ -29,9 +33,16 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-    event.respondWith(
-        caches.match(event.request).then((response) => {
-            return response || fetch(event.request);
-        })
-    );
+    // Network First for index.html, else Cache First
+    if (event.request.url.includes('index.html') || event.request.url === self.location.origin + '/') {
+        event.respondWith(
+            fetch(event.request).catch(() => caches.match(event.request))
+        );
+    } else {
+        event.respondWith(
+            caches.match(event.request).then((response) => {
+                return response || fetch(event.request);
+            })
+        );
+    }
 });

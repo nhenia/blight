@@ -11,6 +11,12 @@
       "src": "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
       "sizes": "25x41",
       "type": "image/png"
+    },
+    {
+      "src": "https://api.iconify.design/material-symbols:map-outline.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
     }
   ]
 }

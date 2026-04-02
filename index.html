@@ -53,6 +53,13 @@
             align-items: center;
             justify-content: center;
         }
+        /* Touch target accessibility for Leaflet controls */
+        .leaflet-bar a {
+            width: 44px !important;
+            height: 44px !important;
+            line-height: 44px !important;
+            font-size: 22px !important;
+        }
         .gps-toggle.active {
             background: #007bff;
             border-color: #0056b3;
@@ -61,7 +68,7 @@
 </head>
 <body>
     <div id="map"></div>
-    <button id="gps-toggle" class="gps-toggle">GPS: OFF</button>
+    <button id="gps-toggle" class="gps-toggle">Follow GPS</button>
 
     <script>
         const map = L.map('map', {
@@ -80,9 +87,26 @@
         }).addTo(map);
 
         const API_ENDPOINT = 'https://data.nola.gov/resource/gjzc-adg8.json';
-        // Spec says: neighborhood='LOWER NINTH WARD' AND status IN('Guilty', 'Uncommitted')
-        // Using available fields as proxy based on exploration
-        const SOQL_QUERY = `?$where=within_box(the_geom, 29.95, -90.03, 29.98, -89.98)`;
+        // Technical Spec aliases and filters (neighborhood column is missing, using spatial proxy)
+        const SOQL_QUERY = `?$select=geoaddress AS address, prevhearingresult AS status, casefiled AS notice_date, the_geom AS location, caseno AS casenumber` +
+                           `&$where=within_box(the_geom, 29.95, -90.03, 29.98, -89.98)`;
+
+        function parseSocrataDate(dateStr) {
+            if (!dateStr || typeof dateStr !== 'string') return new Date();
+            // Handle compact Socrata format: YYYYMMDDHHMMSS.sss
+            if (dateStr.length >= 8 && !dateStr.includes('-') && !dateStr.includes(':')) {
+                const y = parseInt(dateStr.substring(0, 4));
+                const m = parseInt(dateStr.substring(4, 6)) - 1;
+                const d = parseInt(dateStr.substring(6, 8));
+                const hh = parseInt(dateStr.substring(8, 10)) || 0;
+                const mm = parseInt(dateStr.substring(10, 12)) || 0;
+                const ss = parseInt(dateStr.substring(12, 14)) || 0;
+                return new Date(y, m, d, hh, mm, ss);
+            }
+            // Fallback to native Date for ISO strings or other formats
+            const d = new Date(dateStr);
+            return isNaN(d.getTime()) ? new Date() : d;
+        }
 
         async function fetchProperties() {
             try {
@@ -96,19 +120,20 @@
 
         function processProperties(data) {
             data.forEach(prop => {
-                if (!prop.the_geom || !prop.the_geom.coordinates) return;
+                // Skip Logic: If missing location, do not map it.
+                if (!prop.location || !prop.location.coordinates) return;
 
-                const lat = prop.the_geom.coordinates[1];
-                const lng = prop.the_geom.coordinates[0];
+                const lat = prop.location.coordinates[1];
+                const lng = prop.location.coordinates[0];
 
-                // Adapt status and dates
+                // Status mapping (default to Uncommitted if not explicitly Guilty)
                 let status = 'Uncommitted';
-                if (prop.prevhearingresult === 'Guilty' || (prop.keystatus && prop.keystatus.includes('Guilty'))) {
+                if (prop.status && prop.status.startsWith('Guilty')) {
                     status = 'Guilty';
                 }
 
-                const noticeDateStr = prop.statdate || prop.casefiled;
-                const noticeDate = new Date(noticeDateStr);
+                // Deadline Calculation: notice_date + 30 days
+                const noticeDate = parseSocrataDate(prop.notice_date);
                 const deadlineDate = new Date(noticeDate);
                 deadlineDate.setDate(deadlineDate.getDate() + 30);
 
@@ -116,7 +141,7 @@
                 const formattedDeadline = deadlineDate.toLocaleDateString();
 
                 addMarker(lat, lng, {
-                    address: prop.geoaddress || prop.location || 'Unknown Address',
+                    address: prop.address || 'Unknown Address',
                     status: status,
                     noticeDate: formattedNoticeDate,
                     deadline: formattedDeadline
@@ -125,7 +150,8 @@
         }
 
         function addMarker(lat, lng, property) {
-            const color = property.status === 'Guilty' ? '#ff0000' : '#ffa500';
+            // Guilty = Red, Uncommitted = Amber/Orange
+            const color = property.status === 'Guilty' ? '#ff0000' : '#FFBF00';
 
             const marker = L.circleMarker([lat, lng], {
                 radius: 8,
@@ -136,14 +162,15 @@
                 fillOpacity: 0.8
             }).addTo(map);
 
+            // Technical Spec: Must use this exact HTML structure
             const popupContent = `
-                <div class="popup-content">
-                  <h3>${property.address}</h3>
-                  <p><b>Status:</b> ${property.status}</p>
-                  <p><b>Notice Date:</b> ${property.noticeDate}</p>
-                  <p><b>30-Day Deadline:</b> ${property.deadline}</p>
-                </div>
-            `;
+<div class="popup-content">
+  <h3>${property.address}</h3>
+  <p><b>Status:</b> ${property.status}</p>
+  <p><b>Notice Date:</b> ${property.noticeDate}</p>
+  <p><b>30-Day Deadline:</b> ${property.deadline}</p>
+</div>
+            `.trim();
 
             marker.bindPopup(popupContent);
         }
@@ -152,13 +179,18 @@
         const gpsToggle = document.getElementById('gps-toggle');
         let watchId = null;
         let userMarker = null;
+        let followUser = true;
+
+        map.on('dragstart', () => {
+            if (watchId !== null) followUser = false;
+        });
 
         gpsToggle.addEventListener('click', () => {
             if (watchId === null) {
                 // Opt-in: Start tracking
                 if ("geolocation" in navigator) {
-                    gpsToggle.textContent = 'GPS: ON';
                     gpsToggle.classList.add('active');
+                    followUser = true;
                     watchId = navigator.geolocation.watchPosition(
                         (position) => {
                             const { latitude, longitude } = position.coords;
@@ -174,7 +206,9 @@
                                     fillOpacity: 0.9
                                 }).addTo(map);
                             }
-                            map.setView([latitude, longitude]);
+                            if (followUser) {
+                                map.setView([latitude, longitude]);
+                            }
                         },
                         (error) => {
                             console.error('GPS error:', error);
@@ -197,7 +231,6 @@
                 navigator.geolocation.clearWatch(watchId);
                 watchId = null;
             }
-            gpsToggle.textContent = 'GPS: OFF';
             gpsToggle.classList.remove('active');
             if (userMarker) {
                 map.removeLayer(userMarker);
