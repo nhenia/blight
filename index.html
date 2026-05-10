@@ -183,6 +183,7 @@
                 <option value="repeat">Repeat offenders</option>
                 <option value="long-term">Long-term abandoned</option>
                 <option value="expiring">About to expire</option>
+                <option value="reclaim">Community Reclaim</option>
             </select>
         </div>
         <div class="filter-section">
@@ -273,6 +274,8 @@
         const clusterCentersLayer = L.layerGroup();
         const outliersLayer = L.layerGroup();
         const osmLayer = L.layerGroup();
+        const streetlightsLayer = L.layerGroup();
+        const camerasLayer = L.layerGroup();
         L.control.layers(
             { "Tactical Dark": darkMap, "Satellite": satelliteMap },
             {
@@ -285,6 +288,8 @@
                 "🎯 Cluster centers (auto)": clusterCentersLayer,
                 "⊙ Solo outliers (auto)": outliersLayer,
                 "🏚️ OSM features (auto)": osmLayer,
+                "💡 Streetlights": streetlightsLayer,
+                "📹 Security Cameras": camerasLayer,
             },
             { position: 'topright', collapsed: false }
         ).addTo(map);
@@ -497,7 +502,10 @@
                     ${fmtField('Days under blight', p.daysUnderBlight)}
                     ${fmtField('Case count', p.caseCount)}
                     ${fmtField('Stage', p.stage)}
+                    ${fmtField("Owner Location", p.mailing_city ? `${p.mailing_city}, ${p.mailing_state} ${p.mailing_zip}` : "")}
+                    ${p.mailing_state && p.mailing_state !== "LA" ? `<div style="color:#ff4444;font-weight:bold;margin-bottom:10px">⚠️ ABSENTEE OWNER (Out of State)</div>` : ""}
                     ${fmtField('Land use', p.landUseDesc)}
+                    ${p.camera_likelihood > 0 ? `<div style="color:#ffbf00;font-weight:bold;margin-bottom:10px">🛡️ HIGH SECURITY (Camera Nearby)</div>` : ""}
                     ${fmtField('Zoning', zoning)}
                     ${fmtField('Has structure', hasStructTxt)}
                     ${fmtField('Last grass cut', p.lastGrassCut)}
@@ -1047,9 +1055,10 @@
             listContainer.innerHTML = visibleBlighted.length > 0
                 ? visibleBlighted.map(item => {
                     const score = item.prop.graffitiScore != null ? `${(item.prop.graffitiScore*100).toFixed(0)}%` : '—';
+                    const security = item.prop.camera_likelihood > 0 ? " · 📹" : "";
                     return `<div class="prop-row" onclick="this.classList.toggle('expanded')">
                         <strong>${item.prop.address}</strong><br>
-                        <small>Deadline: ${item.prop.deadline} · Score: ${score}</small>
+                        <small>Deadline: ${item.prop.deadline} · Score: ${score}${security}</small>
                         ${renderPropCard(item)}
                     </div>`;
                 }).join('')
@@ -1102,6 +1111,7 @@
             solo: { cluster: 'solo' },
             repeat: { repeatOnly: true },
             'long-term': { daysBlightedMin: 365, activeRehab: 'exclude' },
+            reclaim: { hasStructure: "no", propertyTypes: new Set(["residential", "vacant"]) },
             expiring: { deadlineWindow: '<7' },
         };
         window.applyPreset = function(name) {
@@ -1197,6 +1207,43 @@
         }
 
         if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+    </script>
+    <script>
+        let _lampsLoaded = false, _camerasLoaded = false;
+        map.on("overlayadd", async (e) => {
+            if (e.layer === streetlightsLayer && !_lampsLoaded) {
+                _lampsLoaded = true;
+                await loadStreetlamps();
+            }
+            if (e.layer === camerasLayer && !_camerasLoaded) {
+                _camerasLoaded = true;
+                await loadCameras();
+            }
+        });
+        async function loadStreetlamps() {
+            if (PROXY_URL === "PLACEHOLDER_PROXY_URL") return;
+            try {
+                const r = await fetch(`${PROXY_URL}?tab=streetlamps`);
+                const rows = await r.json();
+                rows.forEach(d => {
+                    const lat = parseFloat(d.lat), lng = parseFloat(d.lng);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+                    L.circleMarker([lat, lng], { radius: 3, color: "#ffff00", fillOpacity: 0.6, weight: 1 }).addTo(streetlightsLayer);
+                });
+            } catch (err) { console.error("Failed to load streetlamps:", err); }
+        }
+        async function loadCameras() {
+            if (PROXY_URL === "PLACEHOLDER_PROXY_URL") return;
+            try {
+                const r = await fetch(`${PROXY_URL}?tab=surveillance`);
+                const rows = await r.json();
+                rows.forEach(d => {
+                    const lat = parseFloat(d.lat), lng = parseFloat(d.lng);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+                    L.marker([lat, lng], { icon: makePinIcon("📹", "camera") }).bindPopup(`<div class="popup-content"><h3>📹 Surveillance</h3><p>Type: ${d.type || "camera"}</p></div>`).addTo(camerasLayer);
+                });
+            } catch (err) { console.error("Failed to load cameras:", err); }
+        }
     </script>
 </body>
 </html>

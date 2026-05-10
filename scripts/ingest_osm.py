@@ -41,6 +41,8 @@ def main() -> int:
 
     book = _open_book()
     ws = _get_or_create_tab(book)
+    ingest_streetlamps(book)
+    ingest_surveillance(book)
     payload = [TAB_HEADER] + [
         [r["id"], r["osm_type"], r["category"], r["lat"], r["lng"], r["name"], r["tags_summary"]]
         for r in rows
@@ -53,3 +55,33 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+def ingest_streetlamps(book):
+    print("Querying Streetlamps...", file=sys.stderr)
+    rows = fetch_streetlamps()
+    header = ["id", "lat", "lng"]
+    ws = _get_or_create_tab_named(book, "streetlamps", header)
+    payload = [header] + [[r["id"], r["lat"], r["lng"]] for r in rows]
+    ws.clear()
+    ws.update(payload, "A1")
+    print(f"  {len(rows)} streetlamps.", file=sys.stderr)
+
+def ingest_surveillance(book):
+    print("Querying Surveillance...", file=sys.stderr)
+    rows = fetch_surveillance()
+    header = ["id", "lat", "lng", "type"]
+    ws = _get_or_create_tab_named(book, "surveillance", header)
+    payload = [header] + [[r["id"], r["lat"], r["lng"], r["type"]] for r in rows]
+    ws.clear()
+    ws.update(payload, "A1")
+    print(f"  {len(rows)} cameras.", file=sys.stderr)
+
+def _get_or_create_tab_named(book, name, header):
+    try:
+        ws = book.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = book.add_worksheet(title=name, rows=10000, cols=len(header))
+        ws.update([header], "A1")
+    return ws
+
+from scripts.lib.osm import fetch_streetlamps, fetch_surveillance

@@ -1,7 +1,9 @@
 """Iterate addresses in the blight sheet, score each via Street View + ONNX, write results back.
 
 Designed to be run from GitHub Actions after `update_database.py` succeeds.
+import math
 Idempotent: skips rows with a recent graffiti_score.
+
 
 Required env: GOOGLE_CREDENTIALS (same as update_database.py), MODEL_PATH (default models/model.onnx).
 
@@ -12,6 +14,7 @@ import json
 import os
 import sys
 import datetime
+from scripts.lib.osm import fetch_surveillance
 import pathlib
 import gspread
 from google.oauth2.service_account import Credentials
@@ -49,6 +52,9 @@ def main() -> int:
     col_idx = {name: i for i, name in enumerate(header)}
 
     clf = GraffitiClassifier(str(model_path))
+    cameras = fetch_surveillance()
+    def dist(lat1, lon1, lat2, lon2):
+        return math.sqrt((lat1-lat2)**2 + (lon1-lon2)**2) * 111000
     sess = ScraperSession(min_interval_s=float(os.environ.get("GRAFFITI_MIN_INTERVAL_S", "3.0")))
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -93,8 +99,10 @@ def main() -> int:
             except Exception as e:
                 print(f"row {r_i}: thumbnail upload failed: {e}", file=sys.stderr)
 
+        cam_score = 1.0 if any(dist(lat, lng, c["lat"], c["lng"]) < 30 for c in cameras) else 0.0
         ts = now.isoformat(timespec='seconds')
         updates = {
+            col_idx["camera_likelihood"]: f"{cam_score:.1f}",
             col_idx["graffiti_score"]: f"{score:.4f}",
             col_idx["graffiti_panoid"]: panoid,
             col_idx["graffiti_classified_at"]: ts,

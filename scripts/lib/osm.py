@@ -76,3 +76,50 @@ def fetch_features(*, session: requests.Session | None = None, timeout: float = 
     r = s.post(OVERPASS_URL, data={"data": build_query()}, timeout=timeout)
     r.raise_for_status()
     return parse_response(r.json())
+
+def build_streetlamp_query(bbox: str = NOLA_BBOX, timeout_s: int = 60) -> str:
+    b = f"({bbox})"
+    return f"""
+[out:json][timeout:{timeout_s}];
+(
+  node["highway"="street_lamp"]{b};
+  node["light_source"]{b};
+);
+out tags;
+""".strip()
+
+def fetch_streetlamps(*, session: requests.Session | None = None, timeout: float = 90.0) -> list[dict]:
+    s = session or requests
+    r = s.post(OVERPASS_URL, data={"data": build_streetlamp_query()}, timeout=timeout)
+    r.raise_for_status()
+    out = []
+    for el in r.json().get("elements", []):
+        if "lat" in el and "lon" in el:
+            out.append({"lat": float(el["lat"]), "lng": float(el["lon"]), "id": el.get("id")})
+    return out
+
+def build_surveillance_query(bbox: str = NOLA_BBOX, timeout_s: int = 60) -> str:
+    b = f"({bbox})"
+    return f"""
+[out:json][timeout:{timeout_s}];
+(
+  node["man_made"="surveillance"]{b};
+  way["man_made"="surveillance"]{b};
+);
+out center tags;
+""".strip()
+
+def fetch_surveillance(*, session: requests.Session | None = None, timeout: float = 90.0) -> list[dict]:
+    s = session or requests
+    r = s.post(OVERPASS_URL, data={"data": build_surveillance_query()}, timeout=timeout)
+    r.raise_for_status()
+    out = []
+    for el in r.json().get("elements", []):
+        tags = el.get("tags") or {}
+        if "lat" in el and "lon" in el:
+            lat, lng = float(el["lat"]), float(el["lon"])
+        elif "center" in el and isinstance(el["center"], dict):
+            lat, lng = float(el["center"]["lat"]), float(el["center"]["lon"])
+        else: continue
+        out.append({"lat": lat, "lng": lng, "id": el.get("id"), "type": tags.get("surveillance:type", "camera")})
+    return out
