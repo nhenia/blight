@@ -273,6 +273,7 @@
         const clusterCentersLayer = L.layerGroup();
         const outliersLayer = L.layerGroup();
         const osmLayer = L.layerGroup();
+        const alprLayer = L.layerGroup();
         L.control.layers(
             { "Tactical Dark": darkMap, "Satellite": satelliteMap },
             {
@@ -285,6 +286,7 @@
                 "🎯 Cluster centers (auto)": clusterCentersLayer,
                 "⊙ Solo outliers (auto)": outliersLayer,
                 "🏚️ OSM features (auto)": osmLayer,
+                "<span style='color: #00E5FF;'>📷 ALPR cameras (DeFlock)</span>": alprLayer,
             },
             { position: 'topright', collapsed: false }
         ).addTo(map);
@@ -1142,7 +1144,7 @@
             document.getElementById('filter-permits-label').textContent = `>= ${filterState.permitsMin} permits`;
         }
 
-        let _demoLoaded = false, _osmLoaded = false;
+        let _demoLoaded = false, _osmLoaded = false, _alprActive = false;
         map.on('overlayadd', async (e) => {
             if (e.layer === demolitionsLayer && !_demoLoaded) {
                 _demoLoaded = true;
@@ -1152,7 +1154,156 @@
                 _osmLoaded = true;
                 await loadOsmFeatures();
             }
+            if (e.layer === alprLayer) {
+                _alprActive = true;
+                loadAlpr();
+            }
         });
+        map.on('overlayremove', (e) => {
+            if (e.layer === alprLayer) {
+                _alprActive = false;
+                alprLayer.clearLayers();
+                _alprSeen.clear();
+            }
+        });
+        map.on('moveend', () => { if (_alprActive) loadAlpr(); });
+
+        // --- DeFlock ALPR layer ---------------------------------------------
+        // Primary source: DeFlock R2 tile CDN (https://cdn.deflock.me/regions/),
+        // public, no auth. Falls back to OpenStreetMap Overpass when the CDN
+        // returns nothing for the visible bounding box.
+        let _alprIndex = null, _alprIndexExpiry = 0;
+        const _alprSeen = new Set(); // dedupe by node id across pans
+
+        async function getDeflockIndex() {
+            const now = Date.now();
+            if (_alprIndex && now < _alprIndexExpiry) return _alprIndex;
+            try {
+                const r = await fetch('https://cdn.deflock.me/regions/index.json');
+                if (!r.ok) throw new Error('index HTTP ' + r.status);
+                const j = await r.json();
+                _alprIndex = {
+                    tile_size_degrees: Number(j.tile_size_degrees),
+                    tile_url: j.tile_url,
+                    regions: new Set(Array.isArray(j.regions) ? j.regions : []),
+                };
+                const exp = Date.parse(j.expiration_utc);
+                _alprIndexExpiry = Number.isFinite(exp) ? exp : now + 5 * 60 * 1000;
+                return _alprIndex;
+            } catch (err) {
+                console.warn('DeFlock index fetch failed:', err);
+                return null;
+            }
+        }
+
+        function alprTileKeysForBounds(bounds, size) {
+            // Hardening: untrusted remote index could specify tile_size_degrees<=0,
+            // which would otherwise spin the for-loops forever and freeze the tab.
+            if (!Number.isFinite(size) || size <= 0) return [];
+            const south = bounds.getSouth(), north = bounds.getNorth();
+            const west = bounds.getWest(), east = bounds.getEast();
+            const startLat = Math.floor(south / size) * size;
+            const startLon = Math.floor(west / size) * size;
+            const keys = [];
+            for (let lat = startLat; lat <= north; lat += size) {
+                for (let lon = startLon; lon <= east; lon += size) {
+                    keys.push(`${lat}/${lon}`);
+                }
+            }
+            return keys;
+        }
+
+        function formatAlprDirection(d) {
+            if (d === undefined || d === null || d === '') return '';
+            const s = String(d).trim();
+            // Hardening: OSM `direction` may be cardinal text ("north", "NE").
+            // Only suffix ° when the raw value is a numeric literal.
+            const numeric = /^-?\d+(\.\d+)?$/.test(s) && Number.isFinite(parseFloat(s));
+            return numeric ? `${s}°` : s;
+        }
+
+        function addAlprMarker(node) {
+            const lat = parseFloat(node.lat);
+            const lon = parseFloat(node.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+            const id = node.id != null ? String(node.id) : `${lat},${lon}`;
+            if (_alprSeen.has(id)) return false;
+            _alprSeen.add(id);
+            const tags = node.tags || {};
+            const type = tags['surveillance:type'] || 'ALPR';
+            const operator = tags.operator || '';
+            const manufacturer = tags.manufacturer || tags.brand || '';
+            const direction = tags['camera:direction'] || tags.direction || '';
+            const mount = tags['camera:mount'] || '';
+            const ref = tags.ref || '';
+            const parts = [`<h3>📷 ${type}</h3>`];
+            if (operator) parts.push(`<p><b>Operator:</b> ${operator}</p>`);
+            if (manufacturer) parts.push(`<p><b>Manufacturer:</b> ${manufacturer}</p>`);
+            if (direction) parts.push(`<p><b>Direction:</b> ${formatAlprDirection(direction)}</p>`);
+            if (mount) parts.push(`<p><b>Mount:</b> ${mount}</p>`);
+            if (ref) parts.push(`<p><b>Ref:</b> ${ref}</p>`);
+            const m = L.marker([lat, lon], { icon: makePinIcon('📷', 'osm') });
+            m.bindPopup(`<div class="popup-content">${parts.join('')}</div>`);
+            alprLayer.addLayer(m);
+            return true;
+        }
+
+        async function loadAlprFromOverpass(bounds) {
+            const s = bounds.getSouth(), w = bounds.getWest(), n = bounds.getNorth(), e = bounds.getEast();
+            const q = `[out:json][timeout:30];\n(\n  node["man_made"="surveillance"]["surveillance:type"="ALPR"](${s},${w},${n},${e});\n  node["surveillance:type"="ALPR"](${s},${w},${n},${e});\n);\nout tags center;`;
+            try {
+                const r = await fetch('https://overpass-api.de/api/interpreter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'data=' + encodeURIComponent(q),
+                });
+                const j = await r.json();
+                const els = Array.isArray(j.elements) ? j.elements : [];
+                let added = 0;
+                els.forEach(el => {
+                    const lat = el.lat != null ? el.lat : (el.center && el.center.lat);
+                    const lon = el.lon != null ? el.lon : (el.center && el.center.lon);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+                    if (addAlprMarker({ id: `osm-${el.id}`, lat, lon, tags: el.tags || {} })) added++;
+                });
+                return added;
+            } catch (err) {
+                console.warn('Overpass ALPR fallback failed:', err);
+                return 0;
+            }
+        }
+
+        async function loadAlpr() {
+            const bounds = map.getBounds();
+            const idx = await getDeflockIndex();
+            let added = 0;
+            if (idx) {
+                const keys = alprTileKeysForBounds(bounds, idx.tile_size_degrees);
+                const present = keys.filter(k => idx.regions.has(k));
+                const tiles = await Promise.all(present.map(async k => {
+                    try {
+                        const [tLat, tLon] = k.split('/');
+                        const url = idx.tile_url.replace('{lat}', tLat).replace('{lon}', tLon);
+                        const r = await fetch(url);
+                        if (!r.ok) return [];
+                        const j = await r.json();
+                        return Array.isArray(j) ? j : [];
+                    } catch { return []; }
+                }));
+                const south = bounds.getSouth(), north = bounds.getNorth();
+                const west = bounds.getWest(), east = bounds.getEast();
+                tiles.flat().forEach(node => {
+                    const lat = parseFloat(node.lat), lon = parseFloat(node.lon);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+                    if (lat < south || lat > north || lon < west || lon > east) return;
+                    if (addAlprMarker(node)) added++;
+                });
+            }
+            if (added === 0) {
+                await loadAlprFromOverpass(bounds);
+            }
+        }
+        // --- end DeFlock ALPR layer -----------------------------------------
         const OSM_CATEGORY_EMOJI = { abandoned: '🏚️', ruins: '🏛️', disused: '🚧', brownfield: '🏭', other: '📍' };
         async function loadOsmFeatures() {
             if (PROXY_URL === 'PLACEHOLDER_PROXY_URL') {

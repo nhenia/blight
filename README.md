@@ -50,6 +50,7 @@ Each address is enriched from NOLA Socrata cross-datasets and visual classificat
 * **Demolition lifecycle** (BlightStatus Demolitions + Permit Apps Demolition rows): pending / permitted / completed
 * **Recent permit history** (Building Permits 2018+ joined by `geopin`): permit count in last 365 days + most recent 5 permit types
 * **OSM-derived blight-adjacent features** (Overpass API): abandoned buildings, ruins, brownfields, disused structures across the city, surfaced as a toggleable map layer
+* **ALPR camera locations** (DeFlock R2 tile CDN with OpenStreetMap Overpass fallback): Automated License Plate Reader sites sourced from [DeFlock](https://github.com/FoggedLens/deflock), surfaced as an opt-in toggleable map layer that refreshes with the viewport
 * **Spatial-pattern auto-pins**: cluster centroids (geographic centers of dense blighted clusters) and solo outliers (isolated targets) computed in-browser from existing lat/lng
 * **Graffiti likelihood** (Street View tile + EfficientNet-B0 ONNX classifier)
 * **Street View thumbnail** (cached in a public Google Drive folder)
