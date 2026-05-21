@@ -23,6 +23,8 @@
         #install-btn { display: none; background: #FFBF00; color: #0b0b0b; border-color: #FFBF00; }
         #ghost-btn { background: #900; color: #fff; border-color: #f00; }
         #sync-status { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: #222; color: #0f0; padding: 5px 15px; border-radius: 20px; border: 1px solid #0f0; font-family: monospace; font-size: 12px; z-index: 1000; display: none; }
+        #data-updated-badge { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(11,11,11,0.85); color: #00E5FF; padding: 5px 14px; border-radius: 20px; border: 1px solid #00E5FF; font-family: monospace; font-size: 12px; z-index: 1000; pointer-events: none; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+        #data-updated-badge.empty { color: #888; border-color: #444; }
         .leaflet-bar a { width: 44px !important; height: 44px !important; line-height: 44px !important; font-size: 22px !important; }
         .leaflet-control-layers { background: #222 !important; color: #eee !important; border: 2px solid #444 !important; border-radius: 8px !important; }
         .copy-btn { margin-top: 8px; width: 100%; background: #222; color: #FFBF00; border: 1px solid #FFBF00; padding: 6px; border-radius: 4px; cursor: pointer; font-family: monospace; font-weight: bold; }
@@ -150,6 +152,8 @@
     </div>
 
     <div id="scrape-status">🔄 Triggering Update...</div>
+
+    <div id="data-updated-badge" class="empty" title="Newest notice date in the loaded blight dataset">Data: —</div>
 
     <div id="map"></div>
     
@@ -731,6 +735,7 @@
                     });
                     _clusterCountCache = null; _clusterGroupsCache = null;
                     filterTimeline();
+                    updateDataFreshnessBadge();
                 } catch (error) { console.error("Signal Lost", error); }
                 return;
             }
@@ -798,7 +803,27 @@
                 });
                 _clusterCountCache = null; _clusterGroupsCache = null;
                 filterTimeline();
+                updateDataFreshnessBadge();
             } catch (error) { console.error("Signal Lost", error); }
+        }
+
+        function updateDataFreshnessBadge() {
+            const badge = document.getElementById('data-updated-badge');
+            if (!badge) return;
+            let newest = null;
+            for (const item of masterData) {
+                const d = item && item.date;
+                if (d instanceof Date && !isNaN(d.getTime())) {
+                    if (newest === null || d.getTime() > newest.getTime()) newest = d;
+                }
+            }
+            if (newest === null) {
+                badge.classList.add('empty');
+                badge.textContent = 'Data: —';
+                return;
+            }
+            badge.classList.remove('empty');
+            badge.textContent = `Newest notice: ${newest.toLocaleDateString()}`;
         }
 
         function shouldShowByGraffiti(prop) {
