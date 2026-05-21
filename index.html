@@ -676,9 +676,12 @@
                 grp.forEach(idx => { sLat += masterData[idx].lat; sLng += masterData[idx].lng; });
                 const lat = sLat / grp.length, lng = sLng / grp.length;
                 const m = L.marker([lat, lng], { icon: makePinIcon('🎯', 'cluster-center') });
+                m._thumbLat = lat;
+                m._thumbLng = lng;
                 m.bindPopup(`<div class="popup-content"><h3>🎯 Cluster center</h3><p><b>Properties in cluster:</b> ${grp.length}</p><p><b>Within ${CLUSTER_RADIUS_M}m radius</b></p></div>`);
                 clusterCentersLayer.addLayer(m);
             });
+            if (map.hasLayer(clusterCentersLayer)) refreshClusterCenterThumbnails();
         }
 
         function renderOutliers() {
@@ -700,8 +703,6 @@
                 const s = item.prop.graffitiScore;
                 if (s == null || s < HOTSPOT_THRESHOLD) return;
                 const marker = L.marker([item.lat, item.lng], { icon: makePinIcon('🎨', 'hotspot') });
-                marker._hotspotLat = item.lat;
-                marker._hotspotLng = item.lng;
                 marker.bindPopup(`
                     <div class="popup-content">
                         <h3>🎨 Auto-hotspot</h3>
@@ -710,7 +711,6 @@
                     </div>`);
                 hotspotLayer.addLayer(marker);
             });
-            if (map.hasLayer(hotspotLayer)) refreshHotspotThumbnails();
         }
 
         async function fetchSectorData() {
@@ -1178,7 +1178,7 @@
             document.getElementById('filter-permits-label').textContent = `>= ${filterState.permitsMin} permits`;
         }
 
-        let _demoLoaded = false, _osmLoaded = false, _alprActive = false, _hotspotThumbsActive = false;
+        let _demoLoaded = false, _osmLoaded = false, _alprActive = false, _clusterThumbsActive = false;
         map.on('overlayadd', async (e) => {
             if (e.layer === demolitionsLayer && !_demoLoaded) {
                 _demoLoaded = true;
@@ -1192,9 +1192,9 @@
                 _alprActive = true;
                 loadAlpr();
             }
-            if (e.layer === hotspotLayer) {
-                _hotspotThumbsActive = true;
-                refreshHotspotThumbnails();
+            if (e.layer === clusterCentersLayer) {
+                _clusterThumbsActive = true;
+                refreshClusterCenterThumbnails();
             }
         });
         map.on('overlayremove', (e) => {
@@ -1203,45 +1203,66 @@
                 alprLayer.clearLayers();
                 _alprSeen.clear();
             }
-            if (e.layer === hotspotLayer) {
-                _hotspotThumbsActive = false;
+            if (e.layer === clusterCentersLayer) {
+                _clusterThumbsActive = false;
             }
         });
         map.on('moveend', () => {
             if (_alprActive) loadAlpr();
-            if (_hotspotThumbsActive) refreshHotspotThumbnails();
+            if (_clusterThumbsActive) refreshClusterCenterThumbnails();
         });
 
-        // --- Hotspot Street View thumbnails (Mapillary) ---------------------
-        // Free Mapillary Graph API. Caches per-hotspot results so panning back
-        // does not refetch. Looks up the nearest crowd-sourced image within
-        // ~75m of the hotspot centroid; binds it as a permanent tooltip above
-        // the marker. Silent no-op when MAPILLARY_TOKEN is unset.
-        const _hotspotThumbCache = new Map(); // key -> { url } | { url: null }
-        const _hotspotInFlight = new Set();
-        function hotspotKey(lat, lng) { return `${lat.toFixed(5)},${lng.toFixed(5)}`; }
+        // --- Cluster-center Street View thumbnails (Mapillary) --------------
+        // Free Mapillary Graph API. For each cluster centroid in the current
+        // viewport, fetch up to 8 candidate images within a tight ~40m bbox,
+        // then pick the one geographically closest to the centroid by
+        // haversine distance. This gives a much tighter aim than picking
+        // whatever Mapillary happens to return first in a wider bbox.
+        // Results are cached per-centroid so panning back never refetches.
+        // Silent no-op when MAPILLARY_TOKEN is unset.
+        const _clusterThumbCache = new Map(); // key -> { url } | { url: null }
+        const _clusterThumbInFlight = new Set();
+        function clusterThumbKey(lat, lng) { return `${lat.toFixed(5)},${lng.toFixed(5)}`; }
 
-        async function fetchMapillaryThumb(lat, lng) {
-            // ~75m bbox around the centroid. 1 deg lat ≈ 111km, so 0.0007 ≈ 78m.
-            const dLat = 0.0007;
-            const dLng = 0.0007 / Math.max(0.1, Math.cos(lat * Math.PI / 180));
+        async function fetchNearestMapillaryThumb(lat, lng) {
+            // ~40m bbox: 1 deg lat ≈ 111km, so 0.00036 ≈ 40m.
+            const dLat = 0.00036;
+            const dLng = 0.00036 / Math.max(0.1, Math.cos(lat * Math.PI / 180));
             const bbox = `${lng - dLng},${lat - dLat},${lng + dLng},${lat + dLat}`;
-            const url = `https://graph.mapillary.com/images?access_token=${encodeURIComponent(MAPILLARY_TOKEN)}&fields=id,thumb_256_url,computed_geometry&bbox=${bbox}&limit=1`;
+            const url = `https://graph.mapillary.com/images?access_token=${encodeURIComponent(MAPILLARY_TOKEN)}&fields=id,thumb_256_url,computed_geometry&bbox=${bbox}&limit=8`;
             try {
                 const r = await fetch(url);
                 if (!r.ok) return null;
                 const j = await r.json();
-                const first = Array.isArray(j.data) && j.data[0];
-                return (first && first.thumb_256_url) || null;
+                const candidates = Array.isArray(j.data) ? j.data : [];
+                let best = null, bestDist = Infinity;
+                for (const c of candidates) {
+                    const coords = c && c.computed_geometry && c.computed_geometry.coordinates;
+                    if (!Array.isArray(coords) || coords.length < 2) continue;
+                    const [cLng, cLat] = coords;
+                    if (!Number.isFinite(cLat) || !Number.isFinite(cLng)) continue;
+                    const d = haversineMeters(lat, lng, cLat, cLng);
+                    if (d < bestDist && c.thumb_256_url) {
+                        bestDist = d;
+                        best = c.thumb_256_url;
+                    }
+                }
+                // Fallback: if no candidate had usable geometry, take the first
+                // with a thumbnail URL rather than dropping the result entirely.
+                if (!best) {
+                    const first = candidates.find(c => c && c.thumb_256_url);
+                    best = first ? first.thumb_256_url : null;
+                }
+                return best;
             } catch (err) {
                 console.warn('Mapillary lookup failed:', err);
                 return null;
             }
         }
 
-        function attachHotspotThumbnail(marker, url) {
+        function attachClusterCenterThumbnail(marker, url) {
             if (!url) return;
-            const html = `<img src="${url}" alt="Street view near hotspot" loading="lazy">`;
+            const html = `<img src="${url}" alt="Street view near cluster center" loading="lazy">`;
             marker.bindTooltip(html, {
                 permanent: true,
                 direction: 'top',
@@ -1251,29 +1272,29 @@
             });
         }
 
-        async function refreshHotspotThumbnails() {
+        async function refreshClusterCenterThumbnails() {
             if (MAPILLARY_TOKEN === 'PLACEHOLDER_MAPILLARY_TOKEN') return;
             const bounds = map.getBounds();
-            const markers = hotspotLayer.getLayers().filter(m =>
-                Number.isFinite(m._hotspotLat) && Number.isFinite(m._hotspotLng) &&
-                bounds.contains([m._hotspotLat, m._hotspotLng])
+            const markers = clusterCentersLayer.getLayers().filter(m =>
+                Number.isFinite(m._thumbLat) && Number.isFinite(m._thumbLng) &&
+                bounds.contains([m._thumbLat, m._thumbLng])
             );
             for (const marker of markers) {
-                const key = hotspotKey(marker._hotspotLat, marker._hotspotLng);
-                if (_hotspotInFlight.has(key)) continue;
-                const cached = _hotspotThumbCache.get(key);
+                const key = clusterThumbKey(marker._thumbLat, marker._thumbLng);
+                if (_clusterThumbInFlight.has(key)) continue;
+                const cached = _clusterThumbCache.get(key);
                 if (cached) {
-                    if (cached.url && !marker.getTooltip()) attachHotspotThumbnail(marker, cached.url);
+                    if (cached.url && !marker.getTooltip()) attachClusterCenterThumbnail(marker, cached.url);
                     continue;
                 }
-                _hotspotInFlight.add(key);
-                fetchMapillaryThumb(marker._hotspotLat, marker._hotspotLng).then(url => {
-                    _hotspotThumbCache.set(key, { url });
-                    if (url) attachHotspotThumbnail(marker, url);
-                }).finally(() => _hotspotInFlight.delete(key));
+                _clusterThumbInFlight.add(key);
+                fetchNearestMapillaryThumb(marker._thumbLat, marker._thumbLng).then(url => {
+                    _clusterThumbCache.set(key, { url });
+                    if (url) attachClusterCenterThumbnail(marker, url);
+                }).finally(() => _clusterThumbInFlight.delete(key));
             }
         }
-        // --- end hotspot thumbnails -----------------------------------------
+        // --- end cluster-center thumbnails ----------------------------------
 
         // --- DeFlock ALPR layer ---------------------------------------------
         // Primary source: DeFlock R2 tile CDN (https://cdn.deflock.me/regions/),
