@@ -23,6 +23,11 @@
         #install-btn { display: none; background: #FFBF00; color: #0b0b0b; border-color: #FFBF00; }
         #ghost-btn { background: #900; color: #fff; border-color: #f00; }
         #sync-status { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: #222; color: #0f0; padding: 5px 15px; border-radius: 20px; border: 1px solid #0f0; font-family: monospace; font-size: 12px; z-index: 1000; display: none; }
+        #data-updated-badge { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(11,11,11,0.85); color: #00E5FF; padding: 5px 14px; border-radius: 20px; border: 1px solid #00E5FF; font-family: monospace; font-size: 12px; z-index: 1000; pointer-events: none; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+        #data-updated-badge.empty { color: #888; border-color: #444; }
+        .hotspot-thumb-tip { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; }
+        .hotspot-thumb-tip::before { display: none !important; }
+        .hotspot-thumb-tip img { width: 96px; height: 64px; object-fit: cover; border-radius: 4px; border: 2px solid #FF3366; box-shadow: 0 2px 6px rgba(0,0,0,0.7); display: block; }
         .leaflet-bar a { width: 44px !important; height: 44px !important; line-height: 44px !important; font-size: 22px !important; }
         .leaflet-control-layers { background: #222 !important; color: #eee !important; border: 2px solid #444 !important; border-radius: 8px !important; }
         .copy-btn { margin-top: 8px; width: 100%; background: #222; color: #FFBF00; border: 1px solid #FFBF00; padding: 6px; border-radius: 4px; cursor: pointer; font-family: monospace; font-weight: bold; }
@@ -151,6 +156,8 @@
 
     <div id="scrape-status">🔄 Triggering Update...</div>
 
+    <div id="data-updated-badge" class="empty" title="Newest notice date in the loaded blight dataset">Data: —</div>
+
     <div id="map"></div>
     
     <div class="time-panel">
@@ -259,6 +266,9 @@
 
     <script>
         const PROXY_URL = 'PLACEHOLDER_PROXY_URL'; // Replace with your Google Apps Script Web App URL
+        // Free Mapillary client token enables Street View-style thumbnails on hotspot pins.
+        // Sign up at https://www.mapillary.com/dashboard/developers (no card). Token starts with "MLY|".
+        const MAPILLARY_TOKEN = 'PLACEHOLDER_MAPILLARY_TOKEN';
         const darkMap = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 20 });
         const satelliteMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 });
         const map = L.map('map', { zoomControl: false, layers: [darkMap] }).setView([29.95, -90.07], 12);
@@ -273,6 +283,7 @@
         const clusterCentersLayer = L.layerGroup();
         const outliersLayer = L.layerGroup();
         const osmLayer = L.layerGroup();
+        const alprLayer = L.layerGroup();
         L.control.layers(
             { "Tactical Dark": darkMap, "Satellite": satelliteMap },
             {
@@ -285,6 +296,7 @@
                 "🎯 Cluster centers (auto)": clusterCentersLayer,
                 "⊙ Solo outliers (auto)": outliersLayer,
                 "🏚️ OSM features (auto)": osmLayer,
+                "<span style='color: #00E5FF;'>📷 ALPR cameras (DeFlock)</span>": alprLayer,
             },
             { position: 'topright', collapsed: false }
         ).addTo(map);
@@ -664,9 +676,12 @@
                 grp.forEach(idx => { sLat += masterData[idx].lat; sLng += masterData[idx].lng; });
                 const lat = sLat / grp.length, lng = sLng / grp.length;
                 const m = L.marker([lat, lng], { icon: makePinIcon('🎯', 'cluster-center') });
+                m._thumbLat = lat;
+                m._thumbLng = lng;
                 m.bindPopup(`<div class="popup-content"><h3>🎯 Cluster center</h3><p><b>Properties in cluster:</b> ${grp.length}</p><p><b>Within ${CLUSTER_RADIUS_M}m radius</b></p></div>`);
                 clusterCentersLayer.addLayer(m);
             });
+            if (map.hasLayer(clusterCentersLayer)) refreshClusterCenterThumbnails();
         }
 
         function renderOutliers() {
@@ -729,6 +744,7 @@
                     });
                     _clusterCountCache = null; _clusterGroupsCache = null;
                     filterTimeline();
+                    updateDataFreshnessBadge();
                 } catch (error) { console.error("Signal Lost", error); }
                 return;
             }
@@ -796,7 +812,27 @@
                 });
                 _clusterCountCache = null; _clusterGroupsCache = null;
                 filterTimeline();
+                updateDataFreshnessBadge();
             } catch (error) { console.error("Signal Lost", error); }
+        }
+
+        function updateDataFreshnessBadge() {
+            const badge = document.getElementById('data-updated-badge');
+            if (!badge) return;
+            let newest = null;
+            for (const item of masterData) {
+                const d = item && item.date;
+                if (d instanceof Date && !isNaN(d.getTime())) {
+                    if (newest === null || d.getTime() > newest.getTime()) newest = d;
+                }
+            }
+            if (newest === null) {
+                badge.classList.add('empty');
+                badge.textContent = 'Data: —';
+                return;
+            }
+            badge.classList.remove('empty');
+            badge.textContent = `Newest notice: ${newest.toLocaleDateString()}`;
         }
 
         function shouldShowByGraffiti(prop) {
@@ -1142,7 +1178,7 @@
             document.getElementById('filter-permits-label').textContent = `>= ${filterState.permitsMin} permits`;
         }
 
-        let _demoLoaded = false, _osmLoaded = false;
+        let _demoLoaded = false, _osmLoaded = false, _alprActive = false, _clusterThumbsActive = false;
         map.on('overlayadd', async (e) => {
             if (e.layer === demolitionsLayer && !_demoLoaded) {
                 _demoLoaded = true;
@@ -1152,7 +1188,250 @@
                 _osmLoaded = true;
                 await loadOsmFeatures();
             }
+            if (e.layer === alprLayer) {
+                _alprActive = true;
+                loadAlpr();
+            }
+            if (e.layer === clusterCentersLayer) {
+                _clusterThumbsActive = true;
+                refreshClusterCenterThumbnails();
+            }
         });
+        map.on('overlayremove', (e) => {
+            if (e.layer === alprLayer) {
+                _alprActive = false;
+                alprLayer.clearLayers();
+                _alprSeen.clear();
+            }
+            if (e.layer === clusterCentersLayer) {
+                _clusterThumbsActive = false;
+            }
+        });
+        map.on('moveend', () => {
+            if (_alprActive) loadAlpr();
+            if (_clusterThumbsActive) refreshClusterCenterThumbnails();
+        });
+
+        // --- Cluster-center Street View thumbnails (Mapillary) --------------
+        // Free Mapillary Graph API. For each cluster centroid in the current
+        // viewport, fetch up to 8 candidate images within a tight ~40m bbox,
+        // then pick the one geographically closest to the centroid by
+        // haversine distance. This gives a much tighter aim than picking
+        // whatever Mapillary happens to return first in a wider bbox.
+        // Results are cached per-centroid so panning back never refetches.
+        // Silent no-op when MAPILLARY_TOKEN is unset.
+        const _clusterThumbCache = new Map(); // key -> { url } | { url: null }
+        const _clusterThumbInFlight = new Set();
+        function clusterThumbKey(lat, lng) { return `${lat.toFixed(5)},${lng.toFixed(5)}`; }
+
+        async function fetchNearestMapillaryThumb(lat, lng) {
+            // ~40m bbox: 1 deg lat ≈ 111km, so 0.00036 ≈ 40m.
+            const dLat = 0.00036;
+            const dLng = 0.00036 / Math.max(0.1, Math.cos(lat * Math.PI / 180));
+            const bbox = `${lng - dLng},${lat - dLat},${lng + dLng},${lat + dLat}`;
+            const url = `https://graph.mapillary.com/images?access_token=${encodeURIComponent(MAPILLARY_TOKEN)}&fields=id,thumb_256_url,computed_geometry&bbox=${bbox}&limit=8`;
+            try {
+                const r = await fetch(url);
+                if (!r.ok) return null;
+                const j = await r.json();
+                const candidates = Array.isArray(j.data) ? j.data : [];
+                let best = null, bestDist = Infinity;
+                for (const c of candidates) {
+                    const coords = c && c.computed_geometry && c.computed_geometry.coordinates;
+                    if (!Array.isArray(coords) || coords.length < 2) continue;
+                    const [cLng, cLat] = coords;
+                    if (!Number.isFinite(cLat) || !Number.isFinite(cLng)) continue;
+                    const d = haversineMeters(lat, lng, cLat, cLng);
+                    if (d < bestDist && c.thumb_256_url) {
+                        bestDist = d;
+                        best = c.thumb_256_url;
+                    }
+                }
+                // Fallback: if no candidate had usable geometry, take the first
+                // with a thumbnail URL rather than dropping the result entirely.
+                if (!best) {
+                    const first = candidates.find(c => c && c.thumb_256_url);
+                    best = first ? first.thumb_256_url : null;
+                }
+                return best;
+            } catch (err) {
+                console.warn('Mapillary lookup failed:', err);
+                return null;
+            }
+        }
+
+        function attachClusterCenterThumbnail(marker, url) {
+            if (!url) return;
+            const html = `<img src="${url}" alt="Street view near cluster center" loading="lazy">`;
+            marker.bindTooltip(html, {
+                permanent: true,
+                direction: 'top',
+                offset: [0, -8],
+                className: 'hotspot-thumb-tip',
+                opacity: 1,
+            });
+        }
+
+        async function refreshClusterCenterThumbnails() {
+            if (MAPILLARY_TOKEN === 'PLACEHOLDER_MAPILLARY_TOKEN') return;
+            const bounds = map.getBounds();
+            const markers = clusterCentersLayer.getLayers().filter(m =>
+                Number.isFinite(m._thumbLat) && Number.isFinite(m._thumbLng) &&
+                bounds.contains([m._thumbLat, m._thumbLng])
+            );
+            for (const marker of markers) {
+                const key = clusterThumbKey(marker._thumbLat, marker._thumbLng);
+                if (_clusterThumbInFlight.has(key)) continue;
+                const cached = _clusterThumbCache.get(key);
+                if (cached) {
+                    if (cached.url && !marker.getTooltip()) attachClusterCenterThumbnail(marker, cached.url);
+                    continue;
+                }
+                _clusterThumbInFlight.add(key);
+                fetchNearestMapillaryThumb(marker._thumbLat, marker._thumbLng).then(url => {
+                    _clusterThumbCache.set(key, { url });
+                    if (url) attachClusterCenterThumbnail(marker, url);
+                }).finally(() => _clusterThumbInFlight.delete(key));
+            }
+        }
+        // --- end cluster-center thumbnails ----------------------------------
+
+        // --- DeFlock ALPR layer ---------------------------------------------
+        // Primary source: DeFlock R2 tile CDN (https://cdn.deflock.me/regions/),
+        // public, no auth. Falls back to OpenStreetMap Overpass when the CDN
+        // returns nothing for the visible bounding box.
+        let _alprIndex = null, _alprIndexExpiry = 0;
+        const _alprSeen = new Set(); // dedupe by node id across pans
+
+        async function getDeflockIndex() {
+            const now = Date.now();
+            if (_alprIndex && now < _alprIndexExpiry) return _alprIndex;
+            try {
+                const r = await fetch('https://cdn.deflock.me/regions/index.json');
+                if (!r.ok) throw new Error('index HTTP ' + r.status);
+                const j = await r.json();
+                _alprIndex = {
+                    tile_size_degrees: Number(j.tile_size_degrees),
+                    tile_url: j.tile_url,
+                    regions: new Set(Array.isArray(j.regions) ? j.regions : []),
+                };
+                const exp = Date.parse(j.expiration_utc);
+                _alprIndexExpiry = Number.isFinite(exp) ? exp : now + 5 * 60 * 1000;
+                return _alprIndex;
+            } catch (err) {
+                console.warn('DeFlock index fetch failed:', err);
+                return null;
+            }
+        }
+
+        function alprTileKeysForBounds(bounds, size) {
+            // Hardening: untrusted remote index could specify tile_size_degrees<=0,
+            // which would otherwise spin the for-loops forever and freeze the tab.
+            if (!Number.isFinite(size) || size <= 0) return [];
+            const south = bounds.getSouth(), north = bounds.getNorth();
+            const west = bounds.getWest(), east = bounds.getEast();
+            const startLat = Math.floor(south / size) * size;
+            const startLon = Math.floor(west / size) * size;
+            const keys = [];
+            for (let lat = startLat; lat <= north; lat += size) {
+                for (let lon = startLon; lon <= east; lon += size) {
+                    keys.push(`${lat}/${lon}`);
+                }
+            }
+            return keys;
+        }
+
+        function formatAlprDirection(d) {
+            if (d === undefined || d === null || d === '') return '';
+            const s = String(d).trim();
+            // Hardening: OSM `direction` may be cardinal text ("north", "NE").
+            // Only suffix ° when the raw value is a numeric literal.
+            const numeric = /^-?\d+(\.\d+)?$/.test(s) && Number.isFinite(parseFloat(s));
+            return numeric ? `${s}°` : s;
+        }
+
+        function addAlprMarker(node) {
+            const lat = parseFloat(node.lat);
+            const lon = parseFloat(node.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+            const id = node.id != null ? String(node.id) : `${lat},${lon}`;
+            if (_alprSeen.has(id)) return false;
+            _alprSeen.add(id);
+            const tags = node.tags || {};
+            const type = tags['surveillance:type'] || 'ALPR';
+            const operator = tags.operator || '';
+            const manufacturer = tags.manufacturer || tags.brand || '';
+            const direction = tags['camera:direction'] || tags.direction || '';
+            const mount = tags['camera:mount'] || '';
+            const ref = tags.ref || '';
+            const parts = [`<h3>📷 ${type}</h3>`];
+            if (operator) parts.push(`<p><b>Operator:</b> ${operator}</p>`);
+            if (manufacturer) parts.push(`<p><b>Manufacturer:</b> ${manufacturer}</p>`);
+            if (direction) parts.push(`<p><b>Direction:</b> ${formatAlprDirection(direction)}</p>`);
+            if (mount) parts.push(`<p><b>Mount:</b> ${mount}</p>`);
+            if (ref) parts.push(`<p><b>Ref:</b> ${ref}</p>`);
+            const m = L.marker([lat, lon], { icon: makePinIcon('📷', 'osm') });
+            m.bindPopup(`<div class="popup-content">${parts.join('')}</div>`);
+            alprLayer.addLayer(m);
+            return true;
+        }
+
+        async function loadAlprFromOverpass(bounds) {
+            const s = bounds.getSouth(), w = bounds.getWest(), n = bounds.getNorth(), e = bounds.getEast();
+            const q = `[out:json][timeout:30];\n(\n  node["man_made"="surveillance"]["surveillance:type"="ALPR"](${s},${w},${n},${e});\n  node["surveillance:type"="ALPR"](${s},${w},${n},${e});\n);\nout tags center;`;
+            try {
+                const r = await fetch('https://overpass-api.de/api/interpreter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'data=' + encodeURIComponent(q),
+                });
+                const j = await r.json();
+                const els = Array.isArray(j.elements) ? j.elements : [];
+                let added = 0;
+                els.forEach(el => {
+                    const lat = el.lat != null ? el.lat : (el.center && el.center.lat);
+                    const lon = el.lon != null ? el.lon : (el.center && el.center.lon);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+                    if (addAlprMarker({ id: `osm-${el.id}`, lat, lon, tags: el.tags || {} })) added++;
+                });
+                return added;
+            } catch (err) {
+                console.warn('Overpass ALPR fallback failed:', err);
+                return 0;
+            }
+        }
+
+        async function loadAlpr() {
+            const bounds = map.getBounds();
+            const idx = await getDeflockIndex();
+            let added = 0;
+            if (idx) {
+                const keys = alprTileKeysForBounds(bounds, idx.tile_size_degrees);
+                const present = keys.filter(k => idx.regions.has(k));
+                const tiles = await Promise.all(present.map(async k => {
+                    try {
+                        const [tLat, tLon] = k.split('/');
+                        const url = idx.tile_url.replace('{lat}', tLat).replace('{lon}', tLon);
+                        const r = await fetch(url);
+                        if (!r.ok) return [];
+                        const j = await r.json();
+                        return Array.isArray(j) ? j : [];
+                    } catch { return []; }
+                }));
+                const south = bounds.getSouth(), north = bounds.getNorth();
+                const west = bounds.getWest(), east = bounds.getEast();
+                tiles.flat().forEach(node => {
+                    const lat = parseFloat(node.lat), lon = parseFloat(node.lon);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+                    if (lat < south || lat > north || lon < west || lon > east) return;
+                    if (addAlprMarker(node)) added++;
+                });
+            }
+            if (added === 0) {
+                await loadAlprFromOverpass(bounds);
+            }
+        }
+        // --- end DeFlock ALPR layer -----------------------------------------
         const OSM_CATEGORY_EMOJI = { abandoned: '🏚️', ruins: '🏛️', disused: '🚧', brownfield: '🏭', other: '📍' };
         async function loadOsmFeatures() {
             if (PROXY_URL === 'PLACEHOLDER_PROXY_URL') {
