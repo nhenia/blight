@@ -25,6 +25,9 @@
         #sync-status { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: #222; color: #0f0; padding: 5px 15px; border-radius: 20px; border: 1px solid #0f0; font-family: monospace; font-size: 12px; z-index: 1000; display: none; }
         #data-updated-badge { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(11,11,11,0.85); color: #00E5FF; padding: 5px 14px; border-radius: 20px; border: 1px solid #00E5FF; font-family: monospace; font-size: 12px; z-index: 1000; pointer-events: none; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
         #data-updated-badge.empty { color: #888; border-color: #444; }
+        .hotspot-thumb-tip { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; }
+        .hotspot-thumb-tip::before { display: none !important; }
+        .hotspot-thumb-tip img { width: 96px; height: 64px; object-fit: cover; border-radius: 4px; border: 2px solid #FF3366; box-shadow: 0 2px 6px rgba(0,0,0,0.7); display: block; }
         .leaflet-bar a { width: 44px !important; height: 44px !important; line-height: 44px !important; font-size: 22px !important; }
         .leaflet-control-layers { background: #222 !important; color: #eee !important; border: 2px solid #444 !important; border-radius: 8px !important; }
         .copy-btn { margin-top: 8px; width: 100%; background: #222; color: #FFBF00; border: 1px solid #FFBF00; padding: 6px; border-radius: 4px; cursor: pointer; font-family: monospace; font-weight: bold; }
@@ -263,6 +266,9 @@
 
     <script>
         const PROXY_URL = 'PLACEHOLDER_PROXY_URL'; // Replace with your Google Apps Script Web App URL
+        // Free Mapillary client token enables Street View-style thumbnails on hotspot pins.
+        // Sign up at https://www.mapillary.com/dashboard/developers (no card). Token starts with "MLY|".
+        const MAPILLARY_TOKEN = 'PLACEHOLDER_MAPILLARY_TOKEN';
         const darkMap = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 20 });
         const satelliteMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 });
         const map = L.map('map', { zoomControl: false, layers: [darkMap] }).setView([29.95, -90.07], 12);
@@ -694,6 +700,8 @@
                 const s = item.prop.graffitiScore;
                 if (s == null || s < HOTSPOT_THRESHOLD) return;
                 const marker = L.marker([item.lat, item.lng], { icon: makePinIcon('🎨', 'hotspot') });
+                marker._hotspotLat = item.lat;
+                marker._hotspotLng = item.lng;
                 marker.bindPopup(`
                     <div class="popup-content">
                         <h3>🎨 Auto-hotspot</h3>
@@ -702,6 +710,7 @@
                     </div>`);
                 hotspotLayer.addLayer(marker);
             });
+            if (map.hasLayer(hotspotLayer)) refreshHotspotThumbnails();
         }
 
         async function fetchSectorData() {
@@ -1169,7 +1178,7 @@
             document.getElementById('filter-permits-label').textContent = `>= ${filterState.permitsMin} permits`;
         }
 
-        let _demoLoaded = false, _osmLoaded = false, _alprActive = false;
+        let _demoLoaded = false, _osmLoaded = false, _alprActive = false, _hotspotThumbsActive = false;
         map.on('overlayadd', async (e) => {
             if (e.layer === demolitionsLayer && !_demoLoaded) {
                 _demoLoaded = true;
@@ -1183,6 +1192,10 @@
                 _alprActive = true;
                 loadAlpr();
             }
+            if (e.layer === hotspotLayer) {
+                _hotspotThumbsActive = true;
+                refreshHotspotThumbnails();
+            }
         });
         map.on('overlayremove', (e) => {
             if (e.layer === alprLayer) {
@@ -1190,8 +1203,77 @@
                 alprLayer.clearLayers();
                 _alprSeen.clear();
             }
+            if (e.layer === hotspotLayer) {
+                _hotspotThumbsActive = false;
+            }
         });
-        map.on('moveend', () => { if (_alprActive) loadAlpr(); });
+        map.on('moveend', () => {
+            if (_alprActive) loadAlpr();
+            if (_hotspotThumbsActive) refreshHotspotThumbnails();
+        });
+
+        // --- Hotspot Street View thumbnails (Mapillary) ---------------------
+        // Free Mapillary Graph API. Caches per-hotspot results so panning back
+        // does not refetch. Looks up the nearest crowd-sourced image within
+        // ~75m of the hotspot centroid; binds it as a permanent tooltip above
+        // the marker. Silent no-op when MAPILLARY_TOKEN is unset.
+        const _hotspotThumbCache = new Map(); // key -> { url } | { url: null }
+        const _hotspotInFlight = new Set();
+        function hotspotKey(lat, lng) { return `${lat.toFixed(5)},${lng.toFixed(5)}`; }
+
+        async function fetchMapillaryThumb(lat, lng) {
+            // ~75m bbox around the centroid. 1 deg lat ≈ 111km, so 0.0007 ≈ 78m.
+            const dLat = 0.0007;
+            const dLng = 0.0007 / Math.max(0.1, Math.cos(lat * Math.PI / 180));
+            const bbox = `${lng - dLng},${lat - dLat},${lng + dLng},${lat + dLat}`;
+            const url = `https://graph.mapillary.com/images?access_token=${encodeURIComponent(MAPILLARY_TOKEN)}&fields=id,thumb_256_url,computed_geometry&bbox=${bbox}&limit=1`;
+            try {
+                const r = await fetch(url);
+                if (!r.ok) return null;
+                const j = await r.json();
+                const first = Array.isArray(j.data) && j.data[0];
+                return (first && first.thumb_256_url) || null;
+            } catch (err) {
+                console.warn('Mapillary lookup failed:', err);
+                return null;
+            }
+        }
+
+        function attachHotspotThumbnail(marker, url) {
+            if (!url) return;
+            const html = `<img src="${url}" alt="Street view near hotspot" loading="lazy">`;
+            marker.bindTooltip(html, {
+                permanent: true,
+                direction: 'top',
+                offset: [0, -8],
+                className: 'hotspot-thumb-tip',
+                opacity: 1,
+            });
+        }
+
+        async function refreshHotspotThumbnails() {
+            if (MAPILLARY_TOKEN === 'PLACEHOLDER_MAPILLARY_TOKEN') return;
+            const bounds = map.getBounds();
+            const markers = hotspotLayer.getLayers().filter(m =>
+                Number.isFinite(m._hotspotLat) && Number.isFinite(m._hotspotLng) &&
+                bounds.contains([m._hotspotLat, m._hotspotLng])
+            );
+            for (const marker of markers) {
+                const key = hotspotKey(marker._hotspotLat, marker._hotspotLng);
+                if (_hotspotInFlight.has(key)) continue;
+                const cached = _hotspotThumbCache.get(key);
+                if (cached) {
+                    if (cached.url && !marker.getTooltip()) attachHotspotThumbnail(marker, cached.url);
+                    continue;
+                }
+                _hotspotInFlight.add(key);
+                fetchMapillaryThumb(marker._hotspotLat, marker._hotspotLng).then(url => {
+                    _hotspotThumbCache.set(key, { url });
+                    if (url) attachHotspotThumbnail(marker, url);
+                }).finally(() => _hotspotInFlight.delete(key));
+            }
+        }
+        // --- end hotspot thumbnails -----------------------------------------
 
         // --- DeFlock ALPR layer ---------------------------------------------
         // Primary source: DeFlock R2 tile CDN (https://cdn.deflock.me/regions/),
